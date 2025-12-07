@@ -7,10 +7,14 @@ const path = require('path');
 const args = process.argv.slice(2);
 let resultsDir = '.';
 let baselineDir = null;
+let runUrl = '';
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--baseline' && args[i + 1]) {
     baselineDir = args[i + 1];
+    i++;
+  } else if (args[i] === '--run-url' && args[i + 1]) {
+    runUrl = args[i + 1];
     i++;
   } else if (!args[i].startsWith('--')) {
     resultsDir = args[i];
@@ -127,6 +131,16 @@ function loadTimingData(benchmarkFile) {
   return null;
 }
 
+// Generate Vercel observability URL for a workflow run
+function getObservabilityUrl(vercelMetadata, runId) {
+  if (!vercelMetadata || !runId) return null;
+  const { teamSlug, projectSlug, environment } = vercelMetadata;
+  if (!teamSlug || !projectSlug) return null;
+  // Always use 'preview' for PR benchmarks
+  const env = environment === 'production' ? 'production' : 'preview';
+  return `https://vercel.com/${teamSlug}/${projectSlug}/observability/workflows/runs/${runId}?environment=${env}`;
+}
+
 // Collect all benchmark data
 function collectBenchmarkData(resultFiles) {
   // Structure: { [benchmarkName]: { [app]: { [backend]: { wallTime, workflowTime, overhead, min, max, samples, firstByteTime } } } }
@@ -162,11 +176,27 @@ function collectBenchmarkData(resultFiles) {
             // Get workflow timing if available
             let workflowTimeMs = null;
             let firstByteTimeMs = null;
+            let lastRunId = null;
+            let observabilityUrl = null;
             if (timings?.summary?.[benchName]) {
               workflowTimeMs = timings.summary[benchName].avgExecutionTimeMs;
               // Get TTFB for stream benchmarks
               if (timings.summary[benchName].avgFirstByteTimeMs !== undefined) {
                 firstByteTimeMs = timings.summary[benchName].avgFirstByteTimeMs;
+              }
+            }
+            // Get the last runId for observability link (Vercel only)
+            if (timings?.timings?.[benchName]?.length > 0) {
+              const lastTiming =
+                timings.timings[benchName][
+                  timings.timings[benchName].length - 1
+                ];
+              lastRunId = lastTiming?.runId;
+              if (timings?.vercel && lastRunId) {
+                observabilityUrl = getObservabilityUrl(
+                  timings.vercel,
+                  lastRunId
+                );
               }
             }
 
@@ -179,6 +209,8 @@ function collectBenchmarkData(resultFiles) {
               max: bench.max,
               samples: bench.sampleCount,
               firstByteTime: firstByteTimeMs,
+              runId: lastRunId,
+              observabilityUrl: observabilityUrl,
             };
           }
         }
@@ -378,6 +410,18 @@ function renderBenchmarkTable(
     }
   }
   console.log('');
+
+  // Collect and render observability links for Vercel world
+  const observabilityLinks = dataPoints
+    .filter((dp) => dp.metrics?.observabilityUrl && dp.backend === 'vercel')
+    .map((dp) => {
+      const frameworkInfo = frameworkConfig[dp.app] || { label: dp.app };
+      return `[${frameworkInfo.label}](${dp.metrics.observabilityUrl})`;
+    });
+
+  if (observabilityLinks.length > 0) {
+    console.log(`_🔍 Observability: ${observabilityLinks.join(' | ')}_\n`);
+  }
 }
 
 // Render the comparison tables
@@ -419,7 +463,8 @@ function renderComparison(data, baselineData) {
   const renderBenchmarkWithEnvironments = (benchName, benchData, isStream) => {
     const baselineBenchData = baselineData?.[benchName] || null;
 
-    console.log(`## ${benchName}\n`);
+    console.log(`<details>`);
+    console.log(`<summary><strong>${benchName}</strong></summary>\n`);
 
     // Render Local Development table
     if (localDevBackends.length > 0) {
@@ -448,6 +493,8 @@ function renderComparison(data, baselineData) {
         { showHeading: false }
       );
     }
+
+    console.log('</details>\n');
   };
 
   // Render regular benchmarks
@@ -457,15 +504,16 @@ function renderComparison(data, baselineData) {
 
   // Render stream benchmarks in a separate section
   if (streamBenchmarks.length > 0) {
-    console.log('---\n');
-    console.log('## Stream Benchmarks\n');
+    console.log('<details>');
     console.log(
-      '_Stream benchmarks include Time to First Byte (TTFB) metrics._\n'
+      '<summary><strong>Stream Benchmarks</strong> <em>(includes TTFB metrics)</em></summary>\n'
     );
 
     for (const [benchName, benchData] of streamBenchmarks) {
       renderBenchmarkWithEnvironments(benchName, benchData, true);
     }
+
+    console.log('</details>\n');
   }
 
   // Summary: Count wins per framework (within each world) and per world (within each framework)
@@ -541,8 +589,11 @@ function renderComparison(data, baselineData) {
   }
 
   // Summary: Best framework per world (by wins)
-  console.log('---\n');
-  console.log('## Summary: Fastest Framework by World\n');
+  console.log('### Summary\n');
+  console.log('<details>');
+  console.log(
+    '<summary><strong>Fastest Framework by World</strong></summary>\n'
+  );
   console.log(`_Winner determined by most benchmark wins_\n`);
   console.log('| World | 🥇 Fastest Framework | Wins |');
   console.log('|:------|:---------------------|-----:|');
@@ -579,10 +630,13 @@ function renderComparison(data, baselineData) {
       );
     }
   }
-  console.log('');
+  console.log('\n</details>\n');
 
   // Summary: Best world per framework (by wins)
-  console.log('## Summary: Fastest World by Framework\n');
+  console.log('<details>');
+  console.log(
+    '<summary><strong>Fastest World by Framework</strong></summary>\n'
+  );
   console.log(`_Winner determined by most benchmark wins_\n`);
   console.log('| Framework | 🥇 Fastest World | Wins |');
   console.log('|:----------|:-----------------|-----:|');
@@ -615,11 +669,11 @@ function renderComparison(data, baselineData) {
       );
     }
   }
-  console.log('');
+  console.log('\n</details>\n');
 
   // Legend
   console.log('<details>');
-  console.log('<summary>Column Definitions</summary>\n');
+  console.log('<summary><strong>Column Definitions</strong></summary>\n');
   console.log(
     '- **Workflow Time**: Runtime reported by workflow (completedAt - createdAt) - *primary metric*'
   );
@@ -646,6 +700,12 @@ function renderComparison(data, baselineData) {
     }
   }
   console.log('</details>');
+
+  // Add link to workflow run
+  if (runUrl) {
+    console.log('\n---');
+    console.log(`📋 [View full workflow run](${runUrl})`);
+  }
 }
 
 // Main

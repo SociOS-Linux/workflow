@@ -8,6 +8,7 @@ const args = process.argv.slice(2);
 let resultsDir = '.';
 let jobName = 'E2E Tests';
 let mode = 'single'; // 'single' for step summary, 'aggregate' for PR comment
+let runUrl = '';
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--job-name' && args[i + 1]) {
@@ -15,6 +16,9 @@ for (let i = 0; i < args.length; i++) {
     i++;
   } else if (args[i] === '--mode' && args[i + 1]) {
     mode = args[i + 1];
+    i++;
+  } else if (args[i] === '--run-url' && args[i + 1]) {
+    runUrl = args[i + 1];
     i++;
   } else if (!args[i].startsWith('--')) {
     resultsDir = args[i];
@@ -106,6 +110,7 @@ function parseJobInfo(filename) {
           'sveltekit',
           'hono',
           'express',
+          'fastify',
           'astro',
           'example',
           'turso',
@@ -211,14 +216,9 @@ function aggregateByCategory(files) {
 function renderSingleJobSummary(summary) {
   const total =
     summary.totalPassed + summary.totalFailed + summary.totalSkipped;
-  const statusEmoji =
-    summary.totalFailed > 0 ? '❌' : summary.totalSkipped > 0 ? '⚠️' : '✅';
+  const statusEmoji = summary.totalFailed > 0 ? '❌' : '✅';
   const statusText =
-    summary.totalFailed > 0
-      ? 'Some tests failed'
-      : summary.totalSkipped > 0
-        ? 'All tests passed (some skipped)'
-        : 'All tests passed';
+    summary.totalFailed > 0 ? 'Some tests failed' : 'All tests passed';
 
   console.log(`## ${statusEmoji} ${jobName}\n`);
   console.log(`**Status:** ${statusText}\n`);
@@ -259,8 +259,7 @@ function renderSingleJobSummary(summary) {
     console.log('| File | Passed | Failed | Skipped |');
     console.log('|:-----|-------:|-------:|--------:|');
     for (const result of summary.fileResults) {
-      const fileStatus =
-        result.failed > 0 ? '❌' : result.skipped > 0 ? '⚠️' : '✅';
+      const fileStatus = result.failed > 0 ? '❌' : '✅';
       console.log(
         `| ${fileStatus} ${result.file} | ${result.passed} | ${result.failed} | ${result.skipped} |`
       );
@@ -297,18 +296,9 @@ function renderAggregatedSummary(categories, overallSummary) {
     overallSummary.totalPassed +
     overallSummary.totalFailed +
     overallSummary.totalSkipped;
-  const statusEmoji =
-    overallSummary.totalFailed > 0
-      ? '❌'
-      : overallSummary.totalSkipped > 0
-        ? '⚠️'
-        : '✅';
+  const statusEmoji = overallSummary.totalFailed > 0 ? '❌' : '✅';
   const statusText =
-    overallSummary.totalFailed > 0
-      ? 'Some tests failed'
-      : overallSummary.totalSkipped > 0
-        ? 'All tests passed (some skipped)'
-        : 'All tests passed';
+    overallSummary.totalFailed > 0 ? 'Some tests failed' : 'All tests passed';
 
   console.log('<!-- e2e-test-results -->');
   console.log(`## 🧪 E2E Test Results\n`);
@@ -328,7 +318,7 @@ function renderAggregatedSummary(categories, overallSummary) {
 
   for (const [catName, cat] of sortedCategories) {
     const catTotal = cat.passed + cat.failed + cat.skipped;
-    const catStatus = cat.failed > 0 ? '❌' : cat.skipped > 0 ? '⚠️' : '✅';
+    const catStatus = cat.failed > 0 ? '❌' : '✅';
     const displayName = categoryNames[catName] || catName;
     console.log(
       `| ${catStatus} ${displayName} | ${cat.passed} | ${cat.failed} | ${cat.skipped} | ${catTotal} |`
@@ -340,21 +330,52 @@ function renderAggregatedSummary(categories, overallSummary) {
   );
   console.log('');
 
-  // Failed tests section
+  // Failed tests section - grouped by category and app
   if (overallSummary.allFailedTests.length > 0) {
     console.log('### ❌ Failed Tests\n');
+
+    // Group failed tests by category, then by app
+    const failedByCategory = new Map();
     for (const test of overallSummary.allFailedTests) {
-      const catDisplay = categoryNames[test.category] || test.category;
+      if (!failedByCategory.has(test.category)) {
+        failedByCategory.set(test.category, new Map());
+      }
+      const catMap = failedByCategory.get(test.category);
+      if (!catMap.has(test.app)) {
+        catMap.set(test.app, []);
+      }
+      catMap.get(test.app).push(test);
+    }
+
+    // Sort categories by defined order
+    const sortedFailedCategories = Array.from(failedByCategory.entries()).sort(
+      ([a], [b]) =>
+        (categoryOrder.indexOf(a) === -1 ? 999 : categoryOrder.indexOf(a)) -
+        (categoryOrder.indexOf(b) === -1 ? 999 : categoryOrder.indexOf(b))
+    );
+
+    for (const [catName, appsMap] of sortedFailedCategories) {
+      const catDisplay = categoryNames[catName] || catName;
+      const catFailedCount = Array.from(appsMap.values()).reduce(
+        (sum, tests) => sum + tests.length,
+        0
+      );
+
       console.log(`<details>`);
       console.log(
-        `<summary>${test.app} (${catDisplay}): ${test.name}</summary>\n`
+        `<summary>${catDisplay} (${catFailedCount} failed)</summary>\n`
       );
-      console.log(`**File:** \`${test.file}\`\n`);
-      if (test.message) {
-        console.log('```');
-        console.log(test.message);
-        console.log('```');
+
+      for (const [appName, tests] of appsMap.entries()) {
+        console.log(`**${appName}** (${tests.length} failed):\n`);
+        for (const test of tests) {
+          // Extract just the test name without "e2e " prefix if present
+          const testName = test.name.replace(/^e2e\s+/, '');
+          console.log(`- \`${testName}\``);
+        }
+        console.log('');
       }
+
       console.log('</details>\n');
     }
   }
@@ -363,7 +384,7 @@ function renderAggregatedSummary(categories, overallSummary) {
   console.log('### Details by Category\n');
 
   for (const [catName, cat] of sortedCategories) {
-    const catStatus = cat.failed > 0 ? '❌' : cat.skipped > 0 ? '⚠️' : '✅';
+    const catStatus = cat.failed > 0 ? '❌' : '✅';
     const displayName = categoryNames[catName] || catName;
 
     console.log(`<details>`);
@@ -371,12 +392,18 @@ function renderAggregatedSummary(categories, overallSummary) {
     console.log('| App | Passed | Failed | Skipped |');
     console.log('|:----|-------:|-------:|--------:|');
     for (const app of cat.apps) {
-      const appStatus = app.failed > 0 ? '❌' : app.skipped > 0 ? '⚠️' : '✅';
+      const appStatus = app.failed > 0 ? '❌' : '✅';
       console.log(
         `| ${appStatus} ${app.name} | ${app.passed} | ${app.failed} | ${app.skipped} |`
       );
     }
     console.log('</details>\n');
+  }
+
+  // Add link to workflow run
+  if (runUrl) {
+    console.log('---');
+    console.log(`📋 [View full workflow run](${runUrl})`);
   }
 }
 
